@@ -1,36 +1,52 @@
 #!/bin/bash
 #===============================================
-# Modify default IP
-sed -i 's/192.168.1.1/192.168.1.251/g' openwrt/package/base-files/files/bin/config_generate
+# 基础固件自定义修改（IP、主机名、密码等，全部保留原有逻辑）
+# Modify default LAN IP 192.168.1.1 → 192.168.1.251
+sed -i 's/192.168.1.1/192.168.1.251/g' package/base-files/files/bin/config_generate
 
 # Modify default theme
 #sed -i 's/luci-theme-bootstrap/luci-theme-argon/g' feeds/luci/collections/luci/Makefile
 
 # Modify hostname
-#sed -i 's/OpenWrt/kenzo/g' openwrt/package/base-files/files/bin/config_generate
+#sed -i 's/OpenWrt/kenzo/g' package/base-files/files/bin/config_generate
 
-#2. Custom settings
+#2. 工具链/系统自定义参数
 #sed -i 's?zstd$?zstd ucl upx\n$(curdir)/upx/compile := $(curdir)/ucl/compile?g' tools/Makefile
 #sed -i 's/$(TARGET_DIR)) install/$(TARGET_DIR)) install --force-overwrite/' package/Makefile
 #sed -i 's/root:.*/root:$1$tTPCBw1t$ldzfp37h5lSpO9VXk4uUE\/:18336:0:99999:7:::/g' package/base-files/files/etc/shadow
 
-# ====================== 新增：替换插件源为你私有仓库 ======================
-# 1. 删除原作者自带的small官方源，避免拉第三方仓库
+# ====================== 前置清理feeds，解决重复源报错 ======================
+# 删除源码自带packages源，杜绝 Duplicate feed name 'packages'
+sed -i '/^src-git packages/d' feeds.conf.default
+# 删除旧small残留源
 sed -i '/src-git small/d' feeds.conf.default
+sed -i '/src-git openwrt-packages/d' feeds.conf.default
+sed -i '/src-git mypkg/d' feeds.conf.default
 
-# 2. 添加你自己Fork的small插件合集仓库
-echo "src-git small https://github.com/Architect111/small-package.git" >> feeds.conf.default
+# ====================== 按顺序添加全部3个你的仓库 + ImmortalWrt官方包 ======================
+# 1. ImmortalWrt官方底层核心包（master分支，适配25.x APK、ipq60xx）
+echo "src-git packages https://github.com/immortalwrt/packages.git;master" >> feeds.conf.default
 
-# 3. 添加你的个人私有插件仓库（存放vnt、quickfile-go）
+# 2. 你Fork的 kenzok8/openwrt-packages（别名small，大量luci插件）
+echo "src-git small https://github.com/Architect111/openwrt-packages.git" >> feeds.conf.default
+
+# 3. small-package 额外插件合集
+echo "src-git smallpkg https://github.com/Architect111/small-package.git" >> feeds.conf.default
+
+# 4. 你的个人私有仓库（vnt、自定义quickstart、私有工具）
 echo "src-git mypkg https://github.com/Architect111/my_personal_packages.git" >> feeds.conf.default
 
-# 4. 可选：添加OpenWrt官方基础包仓库（按需保留）
-echo "src-git packages https://github.com/openwrt/packages.git" >> feeds.conf.default
+# ====================== 全局替换国内中科大镜像，根治wget error 8下载中断 ======================
+sed -i 's|https://downloads.immortalwrt.org|https://mirrors.ustc.edu.cn/immortalwrt|g' feeds.conf.default
 
-# 5. 更新feeds索引，让编译系统识别你的插件
+# ====================== 刷新安装全部软件源 ======================
+./scripts/feeds clean
 ./scripts/feeds update -a
 ./scripts/feeds install -a
 
-# ====================== 可选：批量清理不用的插件（减少编译扫描范围） ======================
-# 删除small合集里你不用的插件，注释掉不需要的rm行即可
+# ====================== 可选：批量删除不需要的插件，减少编译体积 ======================
 # rm -rf feeds/small/luci-app-alist feeds/small/luci-app-passwall feeds/small/luci-app-mosdns
+
+# ====================== 可选：默认勾选Argon主题+Quickstart首页 ======================
+# echo "CONFIG_PACKAGE_luci-theme-argon=y" >> .config
+# echo "CONFIG_PACKAGE_luci-app-quickstart=y" >> .config
