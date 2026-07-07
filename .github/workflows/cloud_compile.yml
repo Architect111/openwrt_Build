@@ -5,11 +5,11 @@ on:
       pkg_list:
         description: '需要编译的插件包名，多个用空格隔开'
         required: true
-        default: 'luci-app-vnt luci-app-quickfile-go'
+        default: 'luci-app-vnt luci-app-quickfile-go luci-theme-argon luci-app-quickstart'
       target_arch:
-        description: '目标架构（如x86_64、aarch64_cortex-a53、aarch64）'
+        description: '目标架构（x86_64 / aarch64_cortex-a53 京东云ipq60xx）'
         required: true
-        default: 'x86_64'
+        default: 'aarch64_cortex-a53'
 
 jobs:
   compile_pkg:
@@ -20,23 +20,26 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: 安装OpenWrt编译依赖
+      - name: 安装ImmortalWrt全套编译依赖
         run: |
           sudo apt update
           sudo apt install -y build-essential clang flex bison g++ gawk gcc-multilib g++-multilib gettext git libncurses-dev libssl-dev python3-distutils rsync unzip zlib1g-dev file
           sudo timedatectl set-timezone "Asia/Shanghai"
 
-      - name: 拉取OpenWrt源码
-        run: git clone https://github.com/openwrt/openwrt.git openwrt
+      - name: 拉取 ImmortalWrt master 源码（本地目录统一immortalwrt）
+        run: |
+          rm -rf immortalwrt
+          git clone https://github.com/immortalwrt/immortalwrt.git immortalwrt
+          cd immortalwrt
+          git checkout master
+          git pull
 
       - name: 配置自定义feeds与插件源
         run: |
-          # 复制自定义脚本到源码目录
-          cp customize.sh openwrt/
-          cp build_pkg.sh openwrt/
-          cd openwrt
+          cp customize.sh immortalwrt/
+          cp build_pkg.sh immortalwrt/
+          cd immortalwrt
           chmod +x customize.sh build_pkg.sh
-          # 执行替换插件源（small你的fork仓 + 个人私有仓）
           ./customize.sh
 
       - name: 执行一键编译脚本
@@ -44,29 +47,34 @@ jobs:
           TARGET_ARCH: ${{ github.event.inputs.target_arch }}
           PKG_LIST: ${{ github.event.inputs.pkg_list }}
         run: |
-          cd openwrt
-          # 自动区分x86和arm架构生成基础config
+          cd immortalwrt
+          # 区分架构配置
           if [[ "$TARGET_ARCH" == "x86_64" ]]; then
             echo "CONFIG_TARGET_x86=y" > .config
             echo "CONFIG_TARGET_x86_64=y" >> .config
-          else
-            echo "CONFIG_TARGET_arm64=y" > .config
-            echo "CONFIG_TARGET_ARCH_PACKAGES=$TARGET_ARCH" >> .config
+          elif [[ "$TARGET_ARCH" == "aarch64_cortex-a53" ]]; then
+            # 京东云AX6600 ipq60xx
+            echo "CONFIG_TARGET_qualcommax=y" > .config
+            echo "CONFIG_TARGET_qualcommax_ipq60xx=y" >> .config
+            echo "CONFIG_TARGET_qualcommax_ipq60xx_DEVICE_jdcloud_ax6600=y" >> .config
           fi
+          # 关闭APK打包，使用传统IPK
+          echo "CONFIG_USE_APK=n" >> .config
+          echo "CONFIG_SIGN_PACKAGES=n" >> .config
           ./build_pkg.sh $PKG_LIST
 
-      - name: 打包编译产物
+      - name: 打包编译产物（仅IPK）
         run: |
           ARCH=${{ github.event.inputs.target_arch }}
-          cd openwrt/bin/packages/${ARCH}/base
-          tar -zcvf ipk_${ARCH}_$(date '+%Y%m%d-%H%M%S').tar.gz ./*.ipk
+          cd immortalwrt/bin/packages/${ARCH}/base
+          tar -zcvf ipk_${ARCH}_$(date '+%Y%m%d-%H%M%S').tar.gz ./*.ipk Packages.gz
 
-      - name: 上传IPK到Release
+      - name: 上传IPK压缩包到Release
         uses: softprops/action-gh-release@v1
         with:
           tag_name: compile-ipk-$(date '+%Y%m%d-%H%M%S')
-          name: 插件编译包 $(date '+%Y-%m-%d %H:%M:%S')
-          files: openwrt/bin/packages/${{ github.event.inputs.target_arch }}/base/*.tar.gz
+          name: 插件IPK编译包 $(date '+%Y-%m-%d %H:%M:%S')
+          files: immortalwrt/bin/packages/${{ github.event.inputs.target_arch }}/base/*.tar.gz
           append_body: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
