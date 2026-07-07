@@ -11,6 +11,10 @@ on:
         required: true
         default: 'aarch64_cortex-a53'
 
+env:
+  GH_PROXY: https://mirror.ghproxy.com/https://github.com
+  WGET_OPTS: "--timeout=60 --tries=5"
+  TARGET_DIR: immortalwrt
 jobs:
   compile_pkg:
     runs-on: ubuntu-22.04
@@ -23,58 +27,87 @@ jobs:
       - name: 安装ImmortalWrt全套编译依赖
         run: |
           sudo apt update
-          sudo apt install -y build-essential clang flex bison g++ gawk gcc-multilib g++-multilib gettext git libncurses-dev libssl-dev python3-distutils rsync unzip zlib1g-dev file
+          sudo apt install -y build-essential clang flex bison g++ gawk gcc-multilib g++-multilib gettext git libncurses-dev libssl-dev python3-distutils rsync unzip zlib1g-dev file ccache
           sudo timedatectl set-timezone "Asia/Shanghai"
 
-      - name: 拉取 ImmortalWrt master 源码（本地目录统一immortalwrt）
+      # 缓存源码&编译工具链，大幅提速二次编译
+      - name: 缓存编译文件
+        uses: actions/cache@v3
+        with:
+          path: |
+            ${{ env.TARGET_DIR }}/dl
+            ${{ env.TARGET_DIR }}/staging_dir
+            ${{ env.TARGET_DIR }}/build_dir
+          key: ${{ github.workflow }}-${{ github.event.inputs.target_arch }}-${{ github.sha }}
+
+      - name: 拉取 ImmortalWrt master 源码（ghproxy防超时）
         run: |
-          rm -rf immortalwrt
-          git clone https://github.com/immortalwrt/immortalwrt.git immortalwrt
-          cd immortalwrt
+          rm -rf ${{ env.TARGET_DIR }}
+          git clone ${GH_PROXY}/immortalwrt/immortalwrt.git ${{ env.TARGET_DIR }}
+          cd ${{ env.TARGET_DIR }}
           git checkout master
           git pull
 
-      - name: 配置自定义feeds与插件源
+      - name: 注入自定义脚本 & 配置feeds国内代理
         run: |
-          cp customize.sh immortalwrt/
-          cp build_pkg.sh immortalwrt/
-          cd immortalwrt
+          cp customize.sh ${{ env.TARGET_DIR }}/
+          cp build_pkg.sh ${{ env.TARGET_DIR }}/
+          cd ${{ env.TARGET_DIR }}
           chmod +x customize.sh build_pkg.sh
+          export WGET_OPTS="${WGET_OPTS}"
           ./customize.sh
 
-      - name: 执行一键编译脚本
+      - name: 初始化硬件平台.config
         env:
           TARGET_ARCH: ${{ github.event.inputs.target_arch }}
-          PKG_LIST: ${{ github.event.inputs.pkg_list }}
         run: |
-          cd immortalwrt
-          # 区分架构配置
+          cd ${{ env.TARGET_DIR }}
+          # 清空旧配置
+          rm -f .config
           if [[ "$TARGET_ARCH" == "x86_64" ]]; then
             echo "CONFIG_TARGET_x86=y" > .config
             echo "CONFIG_TARGET_x86_64=y" >> .config
+            echo "CONFIG_TARGET_x86_64_DEVICE_generic=y" >> .config
           elif [[ "$TARGET_ARCH" == "aarch64_cortex-a53" ]]; then
-            # 京东云AX6600 ipq60xx
+            # 京东云AX6600 ipq60xx 平台
             echo "CONFIG_TARGET_qualcommax=y" > .config
             echo "CONFIG_TARGET_qualcommax_ipq60xx=y" >> .config
             echo "CONFIG_TARGET_qualcommax_ipq60xx_DEVICE_jdcloud_ax6600=y" >> .config
           fi
-          # 关闭APK打包，使用传统IPK
+          # 全局编译参数
           echo "CONFIG_USE_APK=n" >> .config
           echo "CONFIG_SIGN_PACKAGES=n" >> .config
+          echo "CONFIG_AUTOREMOVE=y" >> .config
+          echo "CONFIG_CCACHE=y" >> .config
+          # 生成完整默认配置（关键：补齐缺失的工具链/架构参数）
+          make defconfig
+
+      - name: 一键批量编译指定插件IPK
+        env:
+          TARGET_ARCH: ${{ github.event.inputs.target_arch }}
+          PKG_LIST: ${{ github.event.inputs.pkg_list }}
+        run: |
+          cd ${{ env.TARGET_DIR }}
+          export WGET_OPTS="${WGET_OPTS}"
           ./build_pkg.sh $PKG_LIST
 
-      - name: 打包编译产物（仅IPK）
+      - name: 打包全目录所有IPK（base/luci/packages等全部收录）
+        env:
+          TARGET_ARCH: ${{ github.event.inputs.target_arch }}
         run: |
           ARCH=${{ github.event.inputs.target_arch }}
-          cd immortalwrt/bin/packages/${ARCH}/base
-          tar -zcvf ipk_${ARCH}_$(date '+%Y%m%d-%H%M%S').tar.gz ./*.ipk Packages.gz
+          cd ${{ env.TARGET_DIR }}/bin/packages/${ARCH}
+          # 打包整个架构下所有分类ipk（base luci packages passwall...）
+          tar -zcvf ipk_${ARCH}_$(date '+%Y%m%d-%H%M%S').tar.gz .
+          mv *.tar.gz ../
 
-      - name: 上传IPK压缩包到Release
+      - name: 上传IPK压缩包到GitHub Release
         uses: softprops/action-gh-release@v1
         with:
           tag_name: compile-ipk-$(date '+%Y%m%d-%H%M%S')
           name: 插件IPK编译包 $(date '+%Y-%m-%d %H:%M:%S')
-          files: immortalwrt/bin/packages/${{ github.event.inputs.target_arch }}/base/*.tar.gz
+          # 修正路径：tar包在上层packages目录
+          files: ${{ env.TARGET_DIR }}/bin/packages/${{ github.event.inputs.target_arch }}/*.tar.gz
           append_body: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
