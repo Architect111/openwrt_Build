@@ -7,13 +7,13 @@ on:
         required: true
         default: 'luci-app-vnt luci-app-quickfile-go'
       target_arch:
-        description: '目标架构（如x86_64、aarch64_cortex-a53）'
+        description: '目标架构（如x86_64、aarch64_cortex-a53、aarch64）'
         required: true
         default: 'x86_64'
 
 jobs:
   compile_pkg:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
       - name: 拉取当前编译仓库完整代码
         uses: actions/checkout@v4
@@ -45,22 +45,28 @@ jobs:
           PKG_LIST: ${{ github.event.inputs.pkg_list }}
         run: |
           cd openwrt
-          # 生成对应架构配置
-          echo "CONFIG_TARGET_x86=y" > .config
-          echo "CONFIG_TARGET_x86_64=y" >> .config
-          echo "CONFIG_TARGET_ARCH_PACKAGES=$TARGET_ARCH" >> .config
+          # 自动区分x86和arm架构生成基础config
+          if [[ "$TARGET_ARCH" == "x86_64" ]]; then
+            echo "CONFIG_TARGET_x86=y" > .config
+            echo "CONFIG_TARGET_x86_64=y" >> .config
+          else
+            echo "CONFIG_TARGET_arm64=y" > .config
+            echo "CONFIG_TARGET_ARCH_PACKAGES=$TARGET_ARCH" >> .config
+          fi
           ./build_pkg.sh $PKG_LIST
 
       - name: 打包编译产物
         run: |
-          cd openwrt/bin/packages/${{ github.event.inputs.target_arch }}
-          tar -zcvf ipk_output_${{ github.event.inputs.target_arch }}.tar.gz ./base/*.ipk
+          ARCH=${{ github.event.inputs.target_arch }}
+          cd openwrt/bin/packages/${ARCH}/base
+          tar -zcvf ipk_${ARCH}_$(date '+%Y%m%d-%H%M%S').tar.gz ./*.ipk
 
       - name: 上传IPK到Release
         uses: softprops/action-gh-release@v1
         with:
-          tag_name: compile-$(date '+%Y%m%d-%H%M')
-          name: 插件编译产物 $(date '+%Y-%m-%d %H:%M')
-          files: openwrt/bin/packages/${{ github.event.inputs.target_arch }}/ipk_output_*.tar.gz
+          tag_name: compile-ipk-$(date '+%Y%m%d-%H%M%S')
+          name: 插件编译包 $(date '+%Y-%m-%d %H:%M:%S')
+          files: openwrt/bin/packages/${{ github.event.inputs.target_arch }}/base/*.tar.gz
+          append_body: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
