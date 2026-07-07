@@ -1,0 +1,66 @@
+name: 云端按需编译IPK
+on:
+  workflow_dispatch:
+    inputs:
+      pkg_list:
+        description: '需要编译的插件包名，多个用空格隔开'
+        required: true
+        default: 'luci-app-vnt luci-app-quickfile-go'
+      target_arch:
+        description: '目标架构（如x86_64、aarch64_cortex-a53）'
+        required: true
+        default: 'x86_64'
+
+jobs:
+  compile_pkg:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 拉取当前编译仓库完整代码
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 安装OpenWrt编译依赖
+        run: |
+          sudo apt update
+          sudo apt install -y build-essential clang flex bison g++ gawk gcc-multilib g++-multilib gettext git libncurses-dev libssl-dev python3-distutils rsync unzip zlib-dev file
+          sudo timedatectl set-timezone "Asia/Shanghai"
+
+      - name: 拉取OpenWrt源码
+        run: git clone https://github.com/openwrt/openwrt.git openwrt
+
+      - name: 配置自定义feeds与插件源
+        run: |
+          # 复制自定义脚本到源码目录
+          cp customize.sh openwrt/
+          cp build_pkg.sh openwrt/
+          cd openwrt
+          chmod +x customize.sh build_pkg.sh
+          # 执行替换插件源（small你的fork仓 + 个人私有仓）
+          ./customize.sh
+
+      - name: 执行一键编译脚本
+        env:
+          TARGET_ARCH: ${{ github.event.inputs.target_arch }}
+          PKG_LIST: ${{ github.event.inputs.pkg_list }}
+        run: |
+          cd openwrt
+          # 生成对应架构配置
+          echo "CONFIG_TARGET_x86=y" > .config
+          echo "CONFIG_TARGET_x86_64=y" >> .config
+          echo "CONFIG_TARGET_ARCH_PACKAGES=$TARGET_ARCH" >> .config
+          ./build_pkg.sh $PKG_LIST
+
+      - name: 打包编译产物
+        run: |
+          cd openwrt/bin/packages/${{ github.event.inputs.target_arch }}
+          tar -zcvf ipk_output_${{ github.event.inputs.target_arch }}.tar.gz ./base/*.ipk
+
+      - name: 上传IPK到Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: compile-$(date '+%Y%m%d-%H%M')
+          name: 插件编译产物 $(date '+%Y-%m-%d %H:%M')
+          files: openwrt/bin/packages/${{ github.event.inputs.target_arch }}/ipk_output_*.tar.gz
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
