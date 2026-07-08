@@ -1,23 +1,31 @@
-name: 云端按需编译IPK
+name: 完整源码编译IPK/固件
 on:
   workflow_dispatch:
     inputs:
       pkg_list:
-        description: '需要编译的插件包名，多个用空格隔开'
+        description: '待编译插件，多包空格分隔'
         required: true
         default: 'luci-app-vnt luci-app-quickfile-go luci-theme-argon luci-app-quickstart'
       target_arch:
-        description: '目标架构（x86_64 / aarch64_cortex-a53 京东云ipq60xx）'
+        description: '目标架构 aarch64_cortex-a53 / x86_64'
         required: true
         default: 'aarch64_cortex-a53'
+      git_branch:
+        description: '源码分支 master / openwrt-25.12'
+        required: true
+        default: 'master'
+      use_apk:
+        description: '是否启用APK打包 y/n（22.03不支持apk）'
+        required: true
+        default: 'n'
       tag:
-        description: 'Release版本标签，留空仅上传产物不发布版本'
+        description: 'Release标签，留空仅存产物'
         required: false
         default: ''
       release_text:
-        description: 'Release更新说明'
+        description: 'Release备注'
         required: false
-        default: 'ImmortalWrt SNAPSHOT master 离线IPK安装包'
+        default: 'ImmortalWrt完整源码编译离线包'
 
 env:
   USTC_GITHUB_MIRROR: https://mirrors.ustc.edu.cn/github-mirror
@@ -32,36 +40,36 @@ jobs:
   compile_pkg:
     runs-on: ubuntu-22.04
     steps:
-      - name: 拉取当前编译仓库完整代码
+      - name: 拉取当前仓库脚本 customize.sh build_pkg.sh
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: 安装全套依赖 + 系统可信根证书（解决SSL证书报错）
+      - name: 安装全套编译依赖+可信CA证书
         run: |
           sudo apt update
           sudo apt install -y build-essential clang flex bison g++ gawk gcc-multilib g++-multilib gettext git libncurses-dev libssl-dev python3-distutils rsync unzip zlib1g-dev file ccache jq ca-certificates
           sudo timedatectl set-timezone "Asia/Shanghai"
 
-      - name: 缓存编译文件（dl/staging/build 提速二次编译）
+      - name: 缓存编译中间文件 dl/staging/build
         uses: actions/cache@v3
         with:
           path: |
             ${{ env.TARGET_DIR }}/dl
             ${{ env.TARGET_DIR }}/staging_dir
             ${{ env.TARGET_DIR }}/build_dir
-          key: ${{ github.workflow }}-${{ github.event.inputs.target_arch }}-${{ github.sha }}
+          key: ${{ github.workflow }}-${{ github.event.inputs.target_arch }}-${{ github.event.inputs.git_branch }}-${{ github.sha }}
 
-      - name: 修复DNS + 中科大稳定镜像拉取ImmortalWrt源码
+      - name: 修复DNS 拉取ImmortalWrt完整源码
         run: |
           echo "nameserver 223.5.5.5" | sudo tee /etc/resolv.conf
           rm -rf ${{ env.TARGET_DIR }}
           git clone https://mirrors.ustc.edu.cn/immortalwrt.git ${{ env.TARGET_DIR }}
           cd ${{ env.TARGET_DIR }}
-          git checkout master
+          git checkout ${{ github.event.inputs.git_branch }}
           git pull
 
-      - name: 注入自定义编译脚本
+      - name: 注入自定义feeds脚本
         run: |
           cp customize.sh ${{ env.TARGET_DIR }}/
           cp build_pkg.sh ${{ env.TARGET_DIR }}/
@@ -72,9 +80,10 @@ jobs:
           export USTC_IMMORTALWRT="${USTC_IMMORTALWRT}"
           ./customize.sh
 
-      - name: 初始化硬件平台.config
+      - name: 初始化硬件平台 .config
         env:
           TARGET_ARCH: ${{ github.event.inputs.target_arch }}
+          USE_APK: ${{ github.event.inputs.use_apk }}
         run: |
           cd ${{ env.TARGET_DIR }}
           rm -f .config
@@ -83,57 +92,61 @@ jobs:
             echo "CONFIG_TARGET_x86_64=y" >> .config
             echo "CONFIG_TARGET_x86_64_DEVICE_generic=y" >> .config
           elif [[ "$TARGET_ARCH" == "aarch64_cortex-a53" ]]; then
-            # 京东云AX6600 ipq60xx 平台
             echo "CONFIG_TARGET_qualcommax=y" > .config
             echo "CONFIG_TARGET_qualcommax_ipq60xx=y" >> .config
             echo "CONFIG_TARGET_qualcommax_ipq60xx_DEVICE_jdcloud_ax6600=y" >> .config
           fi
-          echo "CONFIG_USE_APK=n" >> .config
+          echo "CONFIG_USE_APK=${USE_APK}" >> .config
           echo "CONFIG_SIGN_PACKAGES=n" >> .config
           echo "CONFIG_AUTOREMOVE=y" >> .config
           echo "CONFIG_CCACHE=y" >> .config
           make defconfig
 
-      - name: 一键批量编译指定插件IPK
+      - name: 批量编译指定插件
         env:
-          TARGET_ARCH: ${{ github.event.inputs.target_arch }}
           PKG_LIST: ${{ github.event.inputs.pkg_list }}
         run: |
           cd ${{ env.TARGET_DIR }}
           export WGET_OPTS="${WGET_OPTS}"
           ./build_pkg.sh $PKG_LIST
 
-      - name: 打包全架构下所有分类IPK
+      - name: 打包全架构IPK/APK压缩包
         env:
           TARGET_ARCH: ${{ github.event.inputs.target_arch }}
         run: |
           ARCH=${{ github.event.inputs.target_arch }}
+          BRANCH=${{ github.event.inputs.git_branch }}
           cd ${{ env.TARGET_DIR }}/bin/packages/${ARCH}
-          tar -zcvf ipk_${ARCH}_$(date '+%Y%m%d-%H%M%S').tar.gz .
+          tar -zcvf PKG_${BRANCH}_${ARCH}_$(date '+%Y%m%d-%H%M%S').tar.gz .
           mv *.tar.gz ../
           echo "build_time=$(date '+%Y年%m月%d日 %H:%M:%S' | jq -sRr @uri)" >> $GITHUB_ENV
 
-      - name: 上传产物至Artifacts（无Release也能下载）
+      - name: 上传产物至Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: IPK-PACK-${{ github.event.inputs.target_arch }}
+          name: FullSource-PKG-${{ github.event.inputs.git_branch }}-${{ github.event.inputs.target_arch }}
           path: ${{ env.TARGET_DIR }}/bin/packages/${{ github.event.inputs.target_arch }}/*.tar.gz
 
-      - name: 发布GitHub Release（仅填写tag才执行）
+      - name: 发布Release（仅填写tag才执行）
         if: ${{ github.event.inputs.tag != '' }}
         uses: softprops/action-gh-release@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           tag_name: ${{ github.event.inputs.tag }}
-          name: 插件IPK编译包 ${{ env.build_time }}
+          name: 完整源码编译包 ${{ env.build_time }}
           body: |
              > ### 
-             - 固件分支：ImmortalWrt SNAPSHOT master 滚动内核
+             - 编译模式：完整ImmortalWrt源码编译
+             - 固件分支：${{ github.event.inputs.git_branch }}
              - 目标架构：${{ github.event.inputs.target_arch }}
-             - 本次编译插件：`${{ github.event.inputs.pkg_list }}`
-
+             - APK打包：${{ github.event.inputs.use_apk }}
+             - 编译插件：`${{ github.event.inputs.pkg_list }}`
              #### 安装前置依赖
-             路由软件包预先安装：`luci luci-base luci-compat kmod-tun`
-             #### 离线安装命令
-             ```bash
+             luci luci-base luci-compat kmod-tun
+             #### IPK安装命令
              opkg install *.ipk
+             #### APK安装命令
+             apk add --allow-untrusted *.apk
+             ${{ github.event.inputs.release_text }}
+          files: ${{ env.TARGET_DIR }}/bin/packages/${{ github.event.inputs.target_arch }}/*.tar.gz
+          append_body: true
