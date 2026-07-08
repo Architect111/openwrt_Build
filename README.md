@@ -6,3 +6,6 @@ chmod +x build_pkg.sh\
 ./build_pkg.sh luci-app-vnt
 # 批量编译多个自用插件
 ./build_pkg.sh luci-app-vnt luci-app-quickfile-go
+# 后续新增多层插件扩展写法customize
+cp -r luci-app-test/luci-app-test ./
+rm -rf luci-app-test
