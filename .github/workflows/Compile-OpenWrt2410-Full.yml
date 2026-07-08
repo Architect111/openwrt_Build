@@ -1,0 +1,146 @@
+name: OpenWrt 24.10 完整源码编译
+on:
+  workflow_dispatch:
+    inputs:
+      pkg_list:
+        description: '待编译插件，多个空格隔开'
+        required: true
+        default: 'luci-app-vnt luci-app-quickfile-go luci-theme-argon luci-app-quickstart'
+      target_arch:
+        description: '架构 aarch64_cortex-a53 / x86_64'
+        required: true
+        default: 'aarch64_cortex-a53'
+      use_apk:
+        description: '开启APK打包 y/n'
+        required: true
+        default: 'y'
+      tag:
+        description: 'Release标签，留空仅保存产物'
+        required: false
+        default: ''
+      release_text:
+        description: 'Release更新备注'
+        required: false
+        default: 'OpenWrt 24.10 稳定版离线安装包'
+
+env:
+  USTC_GITHUB_MIRROR: https://mirrors.ustc.edu.cn/github-mirror
+  USTC_OPENWRT: https://mirrors.ustc.edu.cn/openwrt
+  WGET_OPTS: "--timeout=60 --tries=5"
+  TARGET_DIR: openwrt-2410
+  TZ: Asia/Shanghai
+permissions:
+  contents: write
+
+jobs:
+  compile_pkg:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: 拉取仓库自定义脚本
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: 安装全套编译依赖+可信CA证书
+        run: |
+          sudo apt update
+          sudo apt install -y build-essential clang flex bison g++ gawk gcc-multilib g++-multilib gettext git libncurses-dev libssl-dev python3-distutils rsync unzip zlib1g-dev file ccache jq ca-certificates
+          sudo timedatectl set-timezone "Asia/Shanghai"
+
+      - name: 缓存编译中间文件 dl/staging/build
+        uses: actions/cache@v3
+        with:
+          path: |
+            ${{ env.TARGET_DIR }}/dl
+            ${{ env.TARGET_DIR }}/staging_dir
+            ${{ env.TARGET_DIR }}/build_dir
+          key: ${{ github.workflow }}-${{ github.event.inputs.target_arch }}-openwrt2410-${{ github.sha }}
+
+      - name: 修复DNS + 拉取 OpenWrt 24.10 官方源码
+        run: |
+          echo "nameserver 223.5.5.5" | sudo tee /etc/resolv.conf
+          rm -rf ${{ env.TARGET_DIR }}
+          git clone https://mirrors.ustc.edu.cn/openwrt.git ${{ env.TARGET_DIR }}
+          cd ${{ env.TARGET_DIR }}
+          git checkout openwrt-24.10
+          git pull
+
+      - name: 注入OpenWrt专用feeds脚本
+        run: |
+          cp customize_openwrt.sh ${{ env.TARGET_DIR }}/
+          cp build_pkg.sh ${{ env.TARGET_DIR }}/
+          cd ${{ env.TARGET_DIR }}
+          chmod +x customize_openwrt.sh build_pkg.sh
+          export WGET_OPTS="${WGET_OPTS}"
+          export USTC_GITHUB_MIRROR="${USTC_GITHUB_MIRROR}"
+          export USTC_OPENWRT="${USTC_OPENWRT}"
+          ./customize_openwrt.sh
+
+      - name: 初始化硬件平台 .config
+        env:
+          TARGET_ARCH: ${{ github.event.inputs.target_arch }}
+          USE_APK: ${{ github.event.inputs.use_apk }}
+        run: |
+          cd ${{ env.TARGET_DIR }}
+          rm -f .config
+          if [[ "$TARGET_ARCH" == "x86_64" ]]; then
+            echo "CONFIG_TARGET_x86=y" > .config
+            echo "CONFIG_TARGET_x86_64=y" >> .config
+            echo "CONFIG_TARGET_x86_64_DEVICE_generic=y" >> .config
+          elif [[ "$TARGET_ARCH" == "aarch64_cortex-a53" ]]; then
+            echo "CONFIG_TARGET_qualcommax=y" > .config
+            echo "CONFIG_TARGET_qualcommax_ipq60xx=y" >> .config
+            echo "CONFIG_TARGET_qualcommax_ipq60xx_DEVICE_jdcloud_ax6600=y" >> .config
+          fi
+          echo "CONFIG_USE_APK=${USE_APK}" >> .config
+          echo "CONFIG_SIGN_PACKAGES=n" >> .config
+          echo "CONFIG_AUTOREMOVE=y" >> .config
+          echo "CONFIG_CCACHE=y" >> .config
+          make defconfig
+
+      - name: 批量编译指定插件IPK/APK
+        env:
+          PKG_LIST: ${{ github.event.inputs.pkg_list }}
+        run: |
+          cd ${{ env.TARGET_DIR }}
+          export WGET_OPTS="${WGET_OPTS}"
+          ./build_pkg.sh $PKG_LIST
+
+      - name: 打包全架构安装包压缩包
+        env:
+          TARGET_ARCH: ${{ github.event.inputs.target_arch }}
+        run: |
+          ARCH=${{ github.event.inputs.target_arch }}
+          cd ${{ env.TARGET_DIR }}/bin/packages/${ARCH}
+          tar -zcvf OpenWrt2410_PKG_${ARCH}_$(date '+%Y%m%d-%H%M%S').tar.gz .
+          mv *.tar.gz ../
+          echo "build_time=$(date '+%Y年%m月%d日 %H:%M:%S' | jq -sRr @uri)" >> $GITHUB_ENV
+
+      - name: 上传产物至Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: OpenWrt2410-FullSource-${{ github.event.inputs.target_arch }}
+          path: ${{ env.TARGET_DIR }}/bin/packages/${{ github.event.inputs.target_arch }}/*.tar.gz
+
+      - name: 发布Release（仅tag非空执行）
+        if: ${{ github.event.inputs.tag != '' }}
+        uses: softprops/action-gh-release@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          tag_name: ${{ github.event.inputs.tag }}
+          name: OpenWrt 24.10 编译包 ${{ env.build_time }}
+          body: |
+             > ### 
+             - 固件版本：官方 OpenWrt 24.10 稳定分支
+             - 目标架构：${{ github.event.inputs.target_arch }}
+             - APK打包开关：${{ github.event.inputs.use_apk }}
+             - 本次编译插件：`${{ github.event.inputs.pkg_list }}`
+             #### 前置依赖
+             luci luci-base luci-compat kmod-tun
+             #### IPK安装
+             opkg install *.ipk
+             #### APK安装
+             apk add --allow-untrusted *.apk
+             ${{ github.event.inputs.release_text }}
+          files: ${{ env.TARGET_DIR }}/bin/packages/${{ github.event.inputs.target_arch }}/*.tar.gz
+          append_body: true
