@@ -54,11 +54,9 @@ jobs:
 
       - name: 修复DNS + 中科大稳定镜像拉取ImmortalWrt源码
         run: |
-          # 强制阿里云公共DNS，彻底解决域名解析失败
           echo "nameserver 223.5.5.5" | sudo tee /etc/resolv.conf
           rm -rf ${{ env.TARGET_DIR }}
-          # 中科大官方镜像，无第三方代理SSL风险
-          git clone ${USTC_GITHUB_MIRROR}/immortalwrt/immortalwrt.git ${{ env.TARGET_DIR }}
+          git clone https://mirrors.ustc.edu.cn/immortalwrt.git ${{ env.TARGET_DIR }}
           cd ${{ env.TARGET_DIR }}
           git checkout master
           git pull
