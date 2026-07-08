@@ -10,11 +10,25 @@ on:
         description: '目标架构（x86_64 / aarch64_cortex-a53 京东云ipq60xx）'
         required: true
         default: 'aarch64_cortex-a53'
+      tag:
+        description: 'Release版本标签，留空仅上传产物不发布版本'
+        required: false
+        default: ''
+      release_text:
+        description: 'Release更新说明'
+        required: false
+        default: 'ImmortalWrt 插件离线IPK编译包'
 
 env:
-  GH_PROXY: https://mirror.ghproxy.com/https://github.com
+  # 替换ghproxy.cc 解决mirror.ghproxy.com域名解析失败
+  GH_PROXY: https://ghproxy.cc/https://github.com
   WGET_OPTS: "--timeout=60 --tries=5"
   TARGET_DIR: immortalwrt
+  TZ: Asia/Shanghai
+# 授予写入Release/文件权限
+permissions:
+  contents: write
+
 jobs:
   compile_pkg:
     runs-on: ubuntu-22.04
@@ -27,7 +41,7 @@ jobs:
       - name: 安装ImmortalWrt全套编译依赖
         run: |
           sudo apt update
-          sudo apt install -y build-essential clang flex bison g++ gawk gcc-multilib g++-multilib gettext git libncurses-dev libssl-dev python3-distutils rsync unzip zlib1g-dev file ccache
+          sudo apt install -y build-essential clang flex bison g++ gawk gcc-multilib g++-multilib gettext git libncurses-dev libssl-dev python3-distutils rsync unzip zlib1g-dev file ccache jq
           sudo timedatectl set-timezone "Asia/Shanghai"
 
       # 缓存源码&编译工具链，大幅提速二次编译
@@ -40,8 +54,10 @@ jobs:
             ${{ env.TARGET_DIR }}/build_dir
           key: ${{ github.workflow }}-${{ github.event.inputs.target_arch }}-${{ github.sha }}
 
-      - name: 拉取 ImmortalWrt master 源码（ghproxy防超时）
+      - name: 修复DNS + 拉取 ImmortalWrt master 源码
         run: |
+          # 强制阿里云公共DNS，解决域名无法解析
+          echo "nameserver 223.5.5.5" | sudo tee /etc/resolv.conf
           rm -rf ${{ env.TARGET_DIR }}
           git clone ${GH_PROXY}/immortalwrt/immortalwrt.git ${{ env.TARGET_DIR }}
           cd ${{ env.TARGET_DIR }}
@@ -79,7 +95,7 @@ jobs:
           echo "CONFIG_SIGN_PACKAGES=n" >> .config
           echo "CONFIG_AUTOREMOVE=y" >> .config
           echo "CONFIG_CCACHE=y" >> .config
-          # 生成完整默认配置（关键：补齐缺失的工具链/架构参数）
+          # 生成完整默认配置（补齐工具链/架构参数）
           make defconfig
 
       - name: 一键批量编译指定插件IPK
@@ -91,23 +107,38 @@ jobs:
           export WGET_OPTS="${WGET_OPTS}"
           ./build_pkg.sh $PKG_LIST
 
-      - name: 打包全目录所有IPK（base/luci/packages等全部收录）
+      - name: 打包全目录所有IPK（base/luci/small/mypkg全部收录）
         env:
           TARGET_ARCH: ${{ github.event.inputs.target_arch }}
         run: |
           ARCH=${{ github.event.inputs.target_arch }}
           cd ${{ env.TARGET_DIR }}/bin/packages/${ARCH}
-          # 打包整个架构下所有分类ipk（base luci packages passwall...）
           tar -zcvf ipk_${ARCH}_$(date '+%Y%m%d-%H%M%S').tar.gz .
           mv *.tar.gz ../
+          # 写入构建时间给Release使用
+          echo "build_time=$(date '+%Y年%m月%d日 %H:%M:%S' | jq -sRr @uri)" >> $GITHUB_ENV
 
-      - name: 上传IPK压缩包到GitHub Release
-        uses: softprops/action-gh-release@v1
+      - name: 上传产物至Artifacts（长期留存，不依赖Release）
+        uses: actions/upload-artifact@v4
         with:
-          tag_name: compile-ipk-$(date '+%Y%m%d-%H%M%S')
-          name: 插件IPK编译包 $(date '+%Y-%m-%d %H:%M:%S')
-          # 修正路径：tar包在上层packages目录
-          files: ${{ env.TARGET_DIR }}/bin/packages/${{ github.event.inputs.target_arch }}/*.tar.gz
-          append_body: true
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          name: IPK-PACK-${{ github.event.inputs.target_arch }}
+          path: ${{ env.TARGET_DIR }}/bin/packages/${{ github.event.inputs.target_arch }}/*.tar.gz
+
+      - name: 发布至GitHub Release（仅输入tag时执行）
+        if: ${{ github.event.inputs.tag != '' }}
+        uses: softprops/action-gh-release@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          tag_name: ${{ github.event.inputs.tag }}
+          name: 插件IPK编译包 ${{ env.build_time }}
+          body: |
+             > ### 
+             - 固件分支：ImmortalWrt SNAPSHOT master 滚动内核
+             - 目标架构：${{ github.event.inputs.target_arch }}
+             - 本次编译插件列表：`${{ github.event.inputs.pkg_list }}`
+
+             #### 安装前置依赖
+             路由软件包预先安装：`luci luci-base luci-compat kmod-tun`
+             #### 离线安装命令
+             ```bash
+             opkg install *.ipk
