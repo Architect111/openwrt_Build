@@ -17,15 +17,14 @@ on:
       release_text:
         description: 'Release更新说明'
         required: false
-        default: 'ImmortalWrt 插件离线IPK编译包'
+        default: 'ImmortalWrt SNAPSHOT master 离线IPK安装包'
 
 env:
-  # 替换ghproxy.cc 解决mirror.ghproxy.com域名解析失败
-  GH_PROXY: https://ghproxy.cc/https://github.com
+  USTC_GITHUB_MIRROR: https://mirrors.ustc.edu.cn/github-mirror
+  USTC_IMMORTALWRT: https://mirrors.ustc.edu.cn/immortalwrt
   WGET_OPTS: "--timeout=60 --tries=5"
   TARGET_DIR: immortalwrt
   TZ: Asia/Shanghai
-# 授予写入Release/文件权限
 permissions:
   contents: write
 
@@ -38,14 +37,13 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: 安装ImmortalWrt全套编译依赖
+      - name: 安装全套依赖 + 系统可信根证书（解决SSL证书报错）
         run: |
           sudo apt update
-          sudo apt install -y build-essential clang flex bison g++ gawk gcc-multilib g++-multilib gettext git libncurses-dev libssl-dev python3-distutils rsync unzip zlib1g-dev file ccache jq
+          sudo apt install -y build-essential clang flex bison g++ gawk gcc-multilib g++-multilib gettext git libncurses-dev libssl-dev python3-distutils rsync unzip zlib1g-dev file ccache jq ca-certificates
           sudo timedatectl set-timezone "Asia/Shanghai"
 
-      # 缓存源码&编译工具链，大幅提速二次编译
-      - name: 缓存编译文件
+      - name: 缓存编译文件（dl/staging/build 提速二次编译）
         uses: actions/cache@v3
         with:
           path: |
@@ -54,23 +52,26 @@ jobs:
             ${{ env.TARGET_DIR }}/build_dir
           key: ${{ github.workflow }}-${{ github.event.inputs.target_arch }}-${{ github.sha }}
 
-      - name: 修复DNS + 拉取 ImmortalWrt master 源码
+      - name: 修复DNS + 中科大稳定镜像拉取ImmortalWrt源码
         run: |
-          # 强制阿里云公共DNS，解决域名无法解析
+          # 强制阿里云公共DNS，彻底解决域名解析失败
           echo "nameserver 223.5.5.5" | sudo tee /etc/resolv.conf
           rm -rf ${{ env.TARGET_DIR }}
-          git clone ${GH_PROXY}/immortalwrt/immortalwrt.git ${{ env.TARGET_DIR }}
+          # 中科大官方镜像，无第三方代理SSL风险
+          git clone ${USTC_GITHUB_MIRROR}/immortalwrt/immortalwrt.git ${{ env.TARGET_DIR }}
           cd ${{ env.TARGET_DIR }}
           git checkout master
           git pull
 
-      - name: 注入自定义脚本 & 配置feeds国内代理
+      - name: 注入自定义编译脚本
         run: |
           cp customize.sh ${{ env.TARGET_DIR }}/
           cp build_pkg.sh ${{ env.TARGET_DIR }}/
           cd ${{ env.TARGET_DIR }}
           chmod +x customize.sh build_pkg.sh
           export WGET_OPTS="${WGET_OPTS}"
+          export USTC_GITHUB_MIRROR="${USTC_GITHUB_MIRROR}"
+          export USTC_IMMORTALWRT="${USTC_IMMORTALWRT}"
           ./customize.sh
 
       - name: 初始化硬件平台.config
@@ -78,7 +79,6 @@ jobs:
           TARGET_ARCH: ${{ github.event.inputs.target_arch }}
         run: |
           cd ${{ env.TARGET_DIR }}
-          # 清空旧配置
           rm -f .config
           if [[ "$TARGET_ARCH" == "x86_64" ]]; then
             echo "CONFIG_TARGET_x86=y" > .config
@@ -90,12 +90,10 @@ jobs:
             echo "CONFIG_TARGET_qualcommax_ipq60xx=y" >> .config
             echo "CONFIG_TARGET_qualcommax_ipq60xx_DEVICE_jdcloud_ax6600=y" >> .config
           fi
-          # 全局编译参数
           echo "CONFIG_USE_APK=n" >> .config
           echo "CONFIG_SIGN_PACKAGES=n" >> .config
           echo "CONFIG_AUTOREMOVE=y" >> .config
           echo "CONFIG_CCACHE=y" >> .config
-          # 生成完整默认配置（补齐工具链/架构参数）
           make defconfig
 
       - name: 一键批量编译指定插件IPK
@@ -107,7 +105,7 @@ jobs:
           export WGET_OPTS="${WGET_OPTS}"
           ./build_pkg.sh $PKG_LIST
 
-      - name: 打包全目录所有IPK（base/luci/small/mypkg全部收录）
+      - name: 打包全架构下所有分类IPK
         env:
           TARGET_ARCH: ${{ github.event.inputs.target_arch }}
         run: |
@@ -115,16 +113,15 @@ jobs:
           cd ${{ env.TARGET_DIR }}/bin/packages/${ARCH}
           tar -zcvf ipk_${ARCH}_$(date '+%Y%m%d-%H%M%S').tar.gz .
           mv *.tar.gz ../
-          # 写入构建时间给Release使用
           echo "build_time=$(date '+%Y年%m月%d日 %H:%M:%S' | jq -sRr @uri)" >> $GITHUB_ENV
 
-      - name: 上传产物至Artifacts（长期留存，不依赖Release）
+      - name: 上传产物至Artifacts（无Release也能下载）
         uses: actions/upload-artifact@v4
         with:
           name: IPK-PACK-${{ github.event.inputs.target_arch }}
           path: ${{ env.TARGET_DIR }}/bin/packages/${{ github.event.inputs.target_arch }}/*.tar.gz
 
-      - name: 发布至GitHub Release（仅输入tag时执行）
+      - name: 发布GitHub Release（仅填写tag才执行）
         if: ${{ github.event.inputs.tag != '' }}
         uses: softprops/action-gh-release@v2
         with:
@@ -135,7 +132,7 @@ jobs:
              > ### 
              - 固件分支：ImmortalWrt SNAPSHOT master 滚动内核
              - 目标架构：${{ github.event.inputs.target_arch }}
-             - 本次编译插件列表：`${{ github.event.inputs.pkg_list }}`
+             - 本次编译插件：`${{ github.event.inputs.pkg_list }}`
 
              #### 安装前置依赖
              路由软件包预先安装：`luci luci-base luci-compat kmod-tun`
