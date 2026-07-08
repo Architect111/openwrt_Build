@@ -1,27 +1,27 @@
-name: SDK轻量化编译插件（仅IPK）
+name: SDK-ImmortalWrt 轻量化编译插件
 on:
   workflow_dispatch:
     inputs:
       pkg_list:
-        description: '待编译插件，空格分隔'
+        description: 待编译插件，多包空格分隔
         required: true
-        default: 'luci-app-vnt luci-app-quickfile-go luci-theme-argon luci-app-quickstart'
+        default: luci-app-vnt luci-app-quickfile-go luci-theme-argon luci-app-quickstart
       target_arch:
-        description: '架构 aarch64_cortex-a53 / x86_64'
+        description: 目标架构 aarch64_cortex-a53 / x86_64
         required: true
-        default: 'aarch64_cortex-a53'
+        default: aarch64_cortex-a53
       sdk_branch:
-        description: 'SDK分支 SNAPSHOT / openwrt-25.12 / openwrt-22.03'
+        description: SDK版本 SNAPSHOT / openwrt-25.12
         required: true
-        default: 'SNAPSHOT'
+        default: SNAPSHOT
       tag:
-        description: 'Release标签，留空仅存产物'
+        description: Release标签，留空仅存产物不发布
         required: false
         default: ''
       release_text:
-        description: 'Release备注'
+        description: Release自定义备注
         required: false
-        default: 'SDK轻量化编译插件IPK'
+        default: ImmortalWrt SDK 离线安装包
 
 env:
   TZ: Asia/Shanghai
@@ -29,54 +29,55 @@ permissions:
   contents: write
 
 jobs:
-  compile_sdk:
-    name: SDK Build ${{ github.event.inputs.target_arch }}-${{ github.event.inputs.sdk_branch }}
+  build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: 拉取仓库代码（读取根目录feeds.conf）
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      # 第三方封装SDK一键编译Action，无需手动拉源码、配置feeds
-      - name: SDK一键编译插件
+      - name: ImmortalWrt SDK一键编译
         uses: sbwml/openwrt-gh-action-sdk@main
         env:
           ARCH: ${{ github.event.inputs.target_arch }}-${{ github.event.inputs.sdk_branch }}
           FEEDNAME: my_custom_pkg
           PACKAGES: ${{ github.event.inputs.pkg_list }}
+          FEEDS_CONF: feeds.conf
           NO_REFRESH_CHECK: true
           V: s
 
-      - name: 上传编译产物到Artifacts
+      - name: 上传产物至Artifacts（永久留存）
         uses: actions/upload-artifact@v4
         with:
-          name: SDK-PKG-${{ github.event.inputs.sdk_branch }}-${{ github.event.inputs.target_arch }}
+          name: SDK-ImmortalWrt-${{ github.event.inputs.sdk_branch }}-${{ github.event.inputs.target_arch }}
           path: bin/packages/${{ github.event.inputs.target_arch }}/my_custom_pkg/
 
-      - name: 打包zip压缩包
+      - name: 打包压缩包
         run: |
           ARCH=${{ github.event.inputs.target_arch }}
           BRANCH=${{ github.event.inputs.sdk_branch }}
-          zip -j SDK_${BRANCH}_${ARCH}_$(date '+%Y%m%d-%H%M%S').zip bin/packages/${ARCH}/my_custom_pkg/*
+          zip -j ImmortalWrt_SDK_${BRANCH}_${ARCH}_$(date '+%Y%m%d-%H%M%S').zip bin/packages/${ARCH}/my_custom_pkg/*
           echo "build_time=$(date '+%Y年%m月%d日 %H:%M:%S' | jq -sRr @uri)" >> $GITHUB_ENV
 
-      - name: 发布GitHub Release（仅tag不为空执行）
+      - name: 发布Release（仅填写tag才执行）
         if: ${{ github.event.inputs.tag != '' }}
         uses: softprops/action-gh-release@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           tag_name: ${{ github.event.inputs.tag }}
-          name: SDK轻量化编译包 ${{ env.build_time }}
+          name: ImmortalWrt SDK编译包 ${{ env.build_time }}
           body: |
              > ### 
-             - 编译模式：OpenWrt SDK轻量化编译（仅插件，不支持内核kmod）
-             - SDK版本：${{ github.event.inputs.sdk_branch }}
+             - 固件类型：ImmortalWrt ${{ github.event.inputs.sdk_branch }}
              - 目标架构：${{ github.event.inputs.target_arch }}
-             - 编译插件列表：`${{ github.event.inputs.pkg_list }}`
+             - 编译插件：`${{ github.event.inputs.pkg_list }}`
              #### 前置依赖
              luci luci-base luci-compat kmod-tun
-             #### 离线安装
+             #### IPK安装
              opkg install *.ipk
+             #### APK新版安装
+             apk add --allow-untrusted *.apk
              ${{ github.event.inputs.release_text }}
-          files: SDK_${{ github.event.inputs.sdk_branch }}_${{ github.event.inputs.target_arch }}*.zip
+          files: ImmortalWrt_SDK_*.zip
           append_body: true
