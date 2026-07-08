@@ -50,6 +50,12 @@ sed -i "s|https://downloads.immortalwrt.org|${USTC_MIRROR}|g" feeds.conf.default
 ./scripts/feeds update -a
 ./scripts/feeds install -a
 
+# 新增：自动处理双层嵌套quickfile-go目录，整机编译可识别
+cd feeds/mypkg
+cp -r luci-app-quickfile-go/luci-app-quickfile-go ./
+rm -rf luci-app-quickfile-go
+cd ../../
+
 # ====================== 可选配置（注释保留，按需启用） ======================
 # 批量删除不需要的插件，减少编译体积
 # rm -rf feeds/small/luci-app-alist feeds/small/luci-app-passwall feeds/small/luci-app-mosdns
