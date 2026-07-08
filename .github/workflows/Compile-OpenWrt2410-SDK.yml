@@ -1,0 +1,77 @@
+name: OpenWrt 24.10 SDK轻量化编译
+on:
+  workflow_dispatch:
+    inputs:
+      pkg_list:
+        description: '待编译插件，空格分隔'
+        required: true
+        default: 'luci-app-vnt luci-app-quickfile-go luci-theme-argon luci-app-quickstart'
+      target_arch:
+        description: '架构 aarch64_cortex-a53 / x86_64'
+        required: true
+        default: 'aarch64_cortex-a53'
+      tag:
+        description: 'Release标签，留空仅存产物'
+        required: false
+        default: ''
+      release_text:
+        description: 'Release备注'
+        required: false
+        default: 'OpenWrt 24.10 SDK轻量化插件包'
+
+env:
+  TZ: Asia/Shanghai
+permissions:
+  contents: write
+
+jobs:
+  compile_sdk:
+    name: SDK Build OpenWrt2410-${{ github.event.inputs.target_arch }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: OpenWrt SDK一键编译插件
+        uses: sbwml/openwrt-gh-action-sdk@main
+        env:
+          # SDK分支固定 openwrt-24.10
+          ARCH: ${{ github.event.inputs.target_arch }}-openwrt-24.10
+          FEEDNAME: my_custom_pkg
+          PACKAGES: ${{ github.event.inputs.pkg_list }}
+          NO_REFRESH_CHECK: true
+          V: s
+
+      - name: 上传产物至Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: SDK-OpenWrt2410-${{ github.event.inputs.target_arch }}
+          path: bin/packages/${{ github.event.inputs.target_arch }}/my_custom_pkg/
+
+      - name: 打包zip压缩包
+        run: |
+          ARCH=${{ github.event.inputs.target_arch }}
+          zip -j OpenWrt2410_SDK_${ARCH}_$(date '+%Y%m%d-%H%M%S').zip bin/packages/${ARCH}/my_custom_pkg/*
+          echo "build_time=$(date '+%Y年%m月%d日 %H:%M:%S' | jq -sRr @uri)" >> $GITHUB_ENV
+
+      - name: 发布Release（仅tag不为空执行）
+        if: ${{ github.event.inputs.tag != '' }}
+        uses: softprops/action-gh-release@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          tag_name: ${{ github.event.inputs.tag }}
+          name: OpenWrt24.10 SDK编译包 ${{ env.build_time }}
+          body: |
+             > ### 
+             - 编译模式：OpenWrt 24.10 SDK轻量化编译
+             - 适配固件：官方 OpenWrt 24.10 稳定版
+             - 目标架构：${{ github.event.inputs.target_arch }}
+             - 编译插件：`${{ github.event.inputs.pkg_list }}`
+             #### 前置依赖
+             luci luci-base luci-compat kmod-tun
+             #### 离线安装命令
+             opkg install *.ipk
+             ${{ github.event.inputs.release_text }}
+          files: OpenWrt2410_SDK_${{ github.event.inputs.target_arch }}*.zip
+          append_body: true
