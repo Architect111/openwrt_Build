@@ -21,3 +21,13 @@ sed -i "s|https://downloads.openwrt.org|${OPENWRT_MIRROR}|g" feeds.conf.default
 ./scripts/feeds clean
 ./scripts/feeds update -a
 ./scripts/feeds install -a
+
+# ========== 新增：自动修复双层嵌套luci-app-quickfile-go ==========
+# 进入拉取完成的mypkg仓库目录
+cd feeds/mypkg
+# 将内层完整插件复制到一级目录
+cp -r luci-app-quickfile-go/luci-app-quickfile-go ./
+# 删除多余外层嵌套文件夹
+rm -rf luci-app-quickfile-go
+# 返回源码根目录
+cd ../../
